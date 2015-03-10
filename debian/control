@@ -7,5 +7,5 @@ Build-Depends: debhelper (>=9.0.0), python-setuptools
 
 Package: sentry
 Architecture: all
-Depends: ${misc:Depends}, python (>=2.7)
+Depends: ${misc:Depends}, python (>=2.7), python-dnspython, python-prettytable
 Description: DNS Proxy used for parental control.
