@@ -7,6 +7,7 @@ from sentry import errors
 from sentry import benchmark
 from sentry import __version__ as ver
 from sentry import tagline, LOG_FORMAT
+from kano.logging import logger
 
 log = logging.getLogger('sentry')
 
@@ -73,4 +74,7 @@ def main():
         raise v
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error("Sentry Server raised Exception {}".format(str(e)))
