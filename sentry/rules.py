@@ -34,6 +34,7 @@ class Rule(object):
     def __str__(self):
         return 'rule [%s] domain [%s]' % (self.__class__, self.domain)
 
+
 class RedirectRule(Rule):
     """
     redirects a query using a CNAME
@@ -182,6 +183,68 @@ class ResolveRule(Rule):
             log.error(result.exception())
 
         raise errors.NetworkError('could not resolve query %s using %s' % (message, self.resolvers))
+
+class CNameRule(Rule):
+    """
+    redirects a query using a CNAME
+    """
+    SYNTAX = [
+        # redirect ^(.*)google.com to nytimes.com
+        re.compile(r'^cname (?P<domain>.*) to (?P<destination>.*) using (?P<resolvers>.*)$',flags=re.MULTILINE)
+    ]
+
+    def __init__(self, settings, domain, args):
+        self.dst = str(args['destination'])
+        if not self.dst.endswith('.'):
+            self.dst += '.'
+
+        resolvers = args.get('resolvers', None)
+
+        self.resolvers =  map(lambda x: x.strip(), resolvers.split(','))
+        log.debug('resolvers: %s' % self.resolvers)
+
+        # how long we wait on upstream dns servers before puking
+        self.timeout = settings.get('resolution_timeout', DEFAULT_TIMEOUT)
+        log.debug('timeout: %d' % self.timeout)
+
+        self.pool = futures.ThreadPoolExecutor(max_workers=len(self.resolvers))
+
+        super(CNameRule, self).__init__(settings, domain, args)
+
+    @profile.howfast
+    def dispatch(self, message, *args, **extras):
+
+        # used for querying dns servers in parallel:
+        @profile.howfast
+        def _resolver(message, resolver):
+            log.debug('sending %s to %s ' % (message,resolver))
+            return dns.query.udp(message, resolver, timeout=self.timeout)
+
+        fs = [ self.pool.submit( _resolver, message, resolver) for resolver in self.resolvers ]
+        result = futures.wait(fs,return_when=futures.FIRST_COMPLETED).done.pop()
+
+        if not result.exception():
+            response = dns.message.make_response(message)
+            resp_data = dns.rrset.from_text(message.question[0].name, DEFAULT_TTL, dns.rdataclass.IN, dns.rdatatype.CNAME, self.dst)
+            response.answer.append(resp_data)
+            r= result.result()
+            address = None
+            for rr in r.answer:
+                for a in rr:
+                    if a.rdclass == dns.rdataclass.IN and a.rdtype == dns.rdatatype.A:
+                        address = a.address
+            if address is not None:
+                a_rec = dns.rrset.from_text(message.question[0].name, DEFAULT_TTL, dns.rdataclass.IN, dns.rdatatype.A, address)
+                response.answer.append(a_rec)
+
+            return response.to_wire()
+        else:
+            log.error(result.exception())
+
+        raise errors.NetworkError('could not resolve query %s using %s' % (message, self.resolvers))
+
+        
+
 
 class RewriteRule(Rule):
     """
