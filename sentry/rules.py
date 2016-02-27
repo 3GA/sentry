@@ -6,6 +6,8 @@ import dns
 import dns.rrset
 import dns.query
 import dns.name
+import dns.resolver
+
 
 from sentry import stats, errors, profile
 
@@ -203,8 +205,12 @@ class CNameRule(Rule):
         self.resolvers =  map(lambda x: x.strip(), resolvers.split(','))
         log.debug('resolvers: %s' % self.resolvers)
 
+        self.upstream = dns.resolver.Resolver(filename=None,configure = False)
+        self.upstream.nameservers = self.resolvers
+
         # how long we wait on upstream dns servers before puking
         self.timeout = settings.get('resolution_timeout', DEFAULT_TIMEOUT)
+        self.upstream.timeout=self.timeout
         log.debug('timeout: %d' % self.timeout)
 
         self.pool = futures.ThreadPoolExecutor(max_workers=len(self.resolvers))
@@ -218,7 +224,7 @@ class CNameRule(Rule):
         @profile.howfast
         def _resolver(message, resolver):
             log.debug('sending %s to %s ' % (message,resolver))
-            return dns.query.udp(message, resolver, timeout=self.timeout)
+            return self.upstream.query(self.dst, "A")
 
         fs = [ self.pool.submit( _resolver, message, resolver) for resolver in self.resolvers ]
         result = futures.wait(fs,return_when=futures.FIRST_COMPLETED).done.pop()
@@ -228,14 +234,11 @@ class CNameRule(Rule):
             resp_data = dns.rrset.from_text(message.question[0].name, DEFAULT_TTL, dns.rdataclass.IN, dns.rdatatype.CNAME, self.dst)
             response.answer.append(resp_data)
             r= result.result()
-            address = None
-            for rr in r.answer:
-                for a in rr:
-                    if a.rdclass == dns.rdataclass.IN and a.rdtype == dns.rdatatype.A:
-                        address = a.address
-            if address is not None:
-                a_rec = dns.rrset.from_text(message.question[0].name, DEFAULT_TTL, dns.rdataclass.IN, dns.rdatatype.A, address)
-                response.answer.append(a_rec)
+            for a in r:
+                if a.rdclass == dns.rdataclass.IN and (a.rdtype == dns.rdatatype.A or a.rdtype == dns.rdatatype.AAAA):
+                    address = a.address
+                    a_rec = dns.rrset.from_text(self.dst, DEFAULT_TTL, dns.rdataclass.IN, a.rdtype, address)
+                    response.answer.append(a_rec)
 
             return response.to_wire()
         else:
