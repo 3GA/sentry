@@ -6,6 +6,8 @@ import dns
 import dns.rrset
 import dns.query
 import dns.name
+import dns.resolver
+
 
 from sentry import stats, errors, profile
 
@@ -33,6 +35,7 @@ class Rule(object):
 
     def __str__(self):
         return 'rule [%s] domain [%s]' % (self.__class__, self.domain)
+
 
 class RedirectRule(Rule):
     """
@@ -182,6 +185,79 @@ class ResolveRule(Rule):
             log.error(result.exception())
 
         raise errors.NetworkError('could not resolve query %s using %s' % (message, self.resolvers))
+
+class CNameRule(Rule):
+    """
+    redirects a query using a CNAME
+    Unlike 'redirect', also supply A/AAAA record for the dst
+    """
+    SYNTAX = [
+        # redirect ^(.*)google.com to nytimes.com
+        re.compile(r'^cname (?P<domain>.*) to (?P<destination>.*) using (?P<resolvers>.*)$',flags=re.MULTILINE)
+    ]
+
+    def __init__(self, settings, domain, args):
+        self.dst = str(args['destination'])
+        if not self.dst.endswith('.'):
+            self.dst += '.'
+
+        resolvers = args.get('resolvers', None)
+        
+        # how long we wait on upstream dns servers before puking
+        self.timeout = settings.get('resolution_timeout', DEFAULT_TIMEOUT)
+        log.debug('timeout: %d' % self.timeout)
+
+        # Add way to obtain A record for dst
+        def get_resolver(nameserver):
+            res =  dns.resolver.Resolver(filename=None,configure = False)
+            res.nameservers = [nameserver]
+            res.timeout = self.timeout
+            return res
+
+        self.resolvers = map(lambda x: get_resolver(x.strip()), resolvers.split(','))
+        log.debug('resolvers: %s' % self.resolvers)
+
+        self.pool = futures.ThreadPoolExecutor(max_workers=len(self.resolvers))
+
+        super(CNameRule, self).__init__(settings, domain, args)
+
+    @profile.howfast
+    def dispatch(self, message, *args, **extras):
+        # return a CNAME plus A/AAAA records for destination of redirect
+
+        
+        # used for querying dns servers in parallel:
+        @profile.howfast
+        def _resolver(message, resolver):
+            log.debug('sending %s to %s ' % (message,resolver.nameservers))
+            return resolver.query(self.dst, "A")
+
+        # First get the A/AAA records:
+        fs = [ self.pool.submit( _resolver, message, resolver) for resolver in self.resolvers ]
+        result = futures.wait(fs,return_when=futures.FIRST_COMPLETED).done.pop()
+
+        if not result.exception():
+            # First make the CNAME part of the response
+            response = dns.message.make_response(message)
+            resp_data = dns.rrset.from_text(message.question[0].name, DEFAULT_TTL, dns.rdataclass.IN, dns.rdatatype.CNAME, self.dst)
+            response.answer.append(resp_data)
+
+            # Add A/AAAA records to it
+            r= result.result()
+            for a in r:
+                if a.rdclass == dns.rdataclass.IN and (a.rdtype == dns.rdatatype.A or a.rdtype == dns.rdatatype.AAAA):
+                    address = a.address
+                    a_rec = dns.rrset.from_text(self.dst, DEFAULT_TTL, dns.rdataclass.IN, a.rdtype, address)
+                    response.answer.append(a_rec)
+
+            return response.to_wire()
+        else:
+            log.error(result.exception())
+
+        raise errors.NetworkError('could not resolve query %s using %s' % (message, self.resolvers))
+
+        
+
 
 class RewriteRule(Rule):
     """

@@ -1,3 +1,10 @@
+sentry (0.5-1) unstable; urgency=low
+
+  * Add 'cname' rule type for returning a CNAME record and corresponding A record
+
+
+ -- Team Kano <dev@kano.me>  Wed, 22 Oct 2014 09:57:49 +0001
+
 sentry (0.5-0) unstable; urgency=low
 
   * Initial release.

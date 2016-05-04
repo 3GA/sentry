@@ -6,6 +6,7 @@ log = logging.getLogger(__name__)
 
 RULES = [
 	rules.RedirectRule,
+	rules.CNameRule,
 	rules.BlockRule,
 	rules.ConditionalBlockRule,
 	rules.LoggingRule,
